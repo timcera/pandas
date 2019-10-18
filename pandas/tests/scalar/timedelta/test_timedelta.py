@@ -410,7 +410,11 @@ class TestTimedeltas:
                 )
 
             str_repr = ["{}{}".format(x, unit) for x in np.arange(5)]
-            result = to_timedelta(wrapper(str_repr))
+            if unit in ['Y', 'A', 'M', 'W']:
+                result = pytest.deprecated_call(to_timedelta,
+                                                wrapper(str_repr))
+            else:
+                result = to_timedelta(wrapper(str_repr))
             tm.assert_index_equal(result, expected)
             result = TimedeltaIndex(wrapper(str_repr))
             tm.assert_index_equal(result, expected)

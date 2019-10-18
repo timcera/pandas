@@ -273,13 +273,13 @@ cpdef inline object precision_from_unit(object unit):
     # in-line comment instead of the value.  Current approach saves an
     # operation.
     if unit in ['D', 'd']:
-        m = stride * 86400000000000L # 1000000000L * DAY_SECONDS
+        m = stride * 86400000000000L  # 1000000000L * DAY_SECONDS
         p = 9
     elif unit in ['H', 'h']:
-        m = stride * 3600000000000L # 1000000000L * 3600
+        m = stride * 3600000000000L  # 1000000000L * 3600
         p = 9
     elif unit in ['T', 'min', 'm']:
-        m = stride * 60000000000L # 1000000000L * 60
+        m = stride * 60000000000L  # 1000000000L * 60
         p = 9
     elif unit in ['S', 's']:
         m = stride * 1000000000L
