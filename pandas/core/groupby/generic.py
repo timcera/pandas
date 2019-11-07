@@ -7,11 +7,22 @@ which here returns a DataFrameGroupBy object.
 """
 from collections import OrderedDict, abc, namedtuple
 import copy
-import functools
 from functools import partial
 from textwrap import dedent
 import typing
-from typing import Any, Callable, FrozenSet, Sequence, Type, Union
+from typing import (
+    Any,
+    Callable,
+    FrozenSet,
+    Hashable,
+    Iterable,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+    cast,
+)
 import warnings
 
 import numpy as np
@@ -132,7 +143,7 @@ def pin_whitelisted_properties(klass: Type[FrameOrSeries], whitelist: FrozenSet[
 class SeriesGroupBy(GroupBy):
     _apply_whitelist = base.series_apply_whitelist
 
-    def _iterate_slices(self):
+    def _iterate_slices(self) -> Iterable[Tuple[Optional[Hashable], Series]]:
         yield self._selection_name, self._selected_obj
 
     @property
@@ -234,7 +245,7 @@ class SeriesGroupBy(GroupBy):
         if isinstance(func, str):
             return getattr(self, func)(*args, **kwargs)
 
-        if isinstance(func, abc.Iterable):
+        elif isinstance(func, abc.Iterable):
             # Catch instances of lists / tuples
             # but not the class list / tuple itself.
             func = _maybe_mangle_lambdas(func)
@@ -251,7 +262,12 @@ class SeriesGroupBy(GroupBy):
 
             try:
                 return self._python_agg_general(func, *args, **kwargs)
-            except Exception:
+            except (ValueError, KeyError, AttributeError, IndexError):
+                # TODO: IndexError can be removed here following GH#29106
+                # TODO: AttributeError is caused by _index_data hijinx in
+                #  libreduction, can be removed after GH#29160
+                # TODO: KeyError is raised in _python_agg_general,
+                #  see see test_groupby.test_basic
                 result = self._aggregate_named(func, *args, **kwargs)
 
             index = Index(sorted(result), name=self.grouper.names[0])
@@ -308,7 +324,7 @@ class SeriesGroupBy(GroupBy):
             if name in results:
                 raise SpecificationError(
                     "Function names must be unique, found multiple named "
-                    "{}".format(name)
+                    "{name}".format(name=name)
                 )
 
             # reset the cache so that we
@@ -354,7 +370,7 @@ class SeriesGroupBy(GroupBy):
             # GH #6265
             return Series([], name=self._selection_name, index=keys)
 
-        def _get_index():
+        def _get_index() -> Index:
             if self.grouper.nkeys > 1:
                 index = MultiIndex.from_tuples(keys, names=self.grouper.names)
             else:
@@ -447,7 +463,7 @@ class SeriesGroupBy(GroupBy):
         result.index = self._selected_obj.index
         return result
 
-    def _transform_fast(self, func, func_nm):
+    def _transform_fast(self, func, func_nm) -> Series:
         """
         fast version of transform, only applicable to
         builtin/cythonizable functions
@@ -462,7 +478,7 @@ class SeriesGroupBy(GroupBy):
             out = self._try_cast(out, self.obj)
         return Series(out, index=self.obj.index, name=self.obj.name)
 
-    def filter(self, func, dropna=True, *args, **kwargs):  # noqa
+    def filter(self, func, dropna=True, *args, **kwargs):
         """
         Return a copy of a Series excluding elements from groups that
         do not satisfy the boolean criterion specified by func.
@@ -497,7 +513,7 @@ class SeriesGroupBy(GroupBy):
             wrapper = lambda x: func(x, *args, **kwargs)
 
         # Interpret np.nan as False.
-        def true_and_notna(x, *args, **kwargs):
+        def true_and_notna(x, *args, **kwargs) -> bool:
             b = wrapper(x, *args, **kwargs)
             return b and notna(b)
 
@@ -505,15 +521,13 @@ class SeriesGroupBy(GroupBy):
             indices = [
                 self._get_index(name) for name, group in self if true_and_notna(group)
             ]
-        except ValueError:
-            raise TypeError("the filter must return a boolean result")
-        except TypeError:
+        except (ValueError, TypeError):
             raise TypeError("the filter must return a boolean result")
 
         filtered = self._apply_filter(indices, dropna)
         return filtered
 
-    def nunique(self, dropna=True):
+    def nunique(self, dropna: bool = True) -> Series:
         """
         Return number of unique elements in the group.
 
@@ -641,16 +655,17 @@ class SeriesGroupBy(GroupBy):
         rep = partial(np.repeat, repeats=np.add.reduceat(inc, idx))
 
         # multi-index components
-        labels = list(map(rep, self.grouper.recons_labels)) + [llab(lab, inc)]
+        codes = self.grouper.recons_codes
+        codes = [rep(level_codes) for level_codes in codes] + [llab(lab, inc)]
         levels = [ping.group_index for ping in self.grouper.groupings] + [lev]
         names = self.grouper.names + [self._selection_name]
 
         if dropna:
-            mask = labels[-1] != -1
+            mask = codes[-1] != -1
             if mask.all():
                 dropna = False
             else:
-                out, labels = out[mask], [label[mask] for label in labels]
+                out, codes = out[mask], [level_codes[mask] for level_codes in codes]
 
         if normalize:
             out = out.astype("float")
@@ -666,11 +681,11 @@ class SeriesGroupBy(GroupBy):
         if sort and bins is None:
             cat = ids[inc][mask] if dropna else ids[inc]
             sorter = np.lexsort((out if ascending else -out, cat))
-            out, labels[-1] = out[sorter], labels[-1][sorter]
+            out, codes[-1] = out[sorter], codes[-1][sorter]
 
         if bins is None:
             mi = MultiIndex(
-                levels=levels, codes=labels, names=names, verify_integrity=False
+                levels=levels, codes=codes, names=names, verify_integrity=False
             )
 
             if is_integer_dtype(out):
@@ -680,14 +695,14 @@ class SeriesGroupBy(GroupBy):
         # for compat. with libgroupby.value_counts need to ensure every
         # bin is present at every index level, null filled with zeros
         diff = np.zeros(len(out), dtype="bool")
-        for lab in labels[:-1]:
-            diff |= np.r_[True, lab[1:] != lab[:-1]]
+        for level_codes in codes[:-1]:
+            diff |= np.r_[True, level_codes[1:] != level_codes[:-1]]
 
         ncat, nbin = diff.sum(), len(levels[-1])
 
         left = [np.repeat(np.arange(ncat), nbin), np.tile(np.arange(nbin), ncat)]
 
-        right = [diff.cumsum() - 1, labels[-1]]
+        right = [diff.cumsum() - 1, codes[-1]]
 
         _, idx = _get_join_indexers(left, right, sort=False, how="left")
         out = np.where(idx != -1, out[idx], 0)
@@ -697,7 +712,10 @@ class SeriesGroupBy(GroupBy):
             out, left[-1] = out[sorter], left[-1][sorter]
 
         # build the multi-index w/ full levels
-        codes = list(map(lambda lab: np.repeat(lab[diff], nbin), labels[:-1]))
+        def build_codes(lev_codes: np.ndarray) -> np.ndarray:
+            return np.repeat(lev_codes[diff], nbin)
+
+        codes = [build_codes(lev_codes) for lev_codes in codes[:-1]]
         codes.append(left[-1])
 
         mi = MultiIndex(levels=levels, codes=codes, names=names, verify_integrity=False)
@@ -706,7 +724,7 @@ class SeriesGroupBy(GroupBy):
             out = ensure_int64(out)
         return Series(out, index=mi, name=self._selection_name)
 
-    def count(self):
+    def count(self) -> Series:
         """
         Compute count of group, excluding missing values.
 
@@ -744,7 +762,7 @@ class SeriesGroupBy(GroupBy):
                 )
             )
         filled = getattr(self, fill_method)(limit=limit)
-        fill_grp = filled.groupby(self.grouper.labels)
+        fill_grp = filled.groupby(self.grouper.codes)
         shifted = fill_grp.shift(periods=periods, freq=freq)
 
         return (filled / shifted) - 1
@@ -754,8 +772,6 @@ class SeriesGroupBy(GroupBy):
 class DataFrameGroupBy(GroupBy):
 
     _apply_whitelist = base.dataframe_apply_whitelist
-
-    _block_agg_axis = 1
 
     _agg_see_also_doc = dedent(
         """
@@ -879,7 +895,23 @@ class DataFrameGroupBy(GroupBy):
                     result = self._aggregate_multiple_funcs(
                         [func], _level=_level, _axis=self.axis
                     )
-                except Exception:
+                except ValueError as err:
+                    if "no results" not in str(err):
+                        # raised directly by _aggregate_multiple_funcs
+                        raise
+                    result = self._aggregate_frame(func)
+                except NotImplementedError as err:
+                    if "axis other than 0 is not supported" in str(err):
+                        # raised directly by _aggregate_multiple_funcs
+                        pass
+                    elif "decimal does not support skipna=True" in str(err):
+                        # FIXME: kludge for DecimalArray tests
+                        pass
+                    else:
+                        raise
+                    # FIXME: this is raised in a bunch of
+                    #  test_whitelist.test_regression_whitelist_methods tests,
+                    #  can be avoided
                     result = self._aggregate_frame(func)
                 else:
                     result.columns = Index(
@@ -900,36 +932,36 @@ class DataFrameGroupBy(GroupBy):
 
     agg = aggregate
 
-    def _iterate_slices(self):
-        if self.axis == 0:
-            # kludge
-            if self._selection is None:
-                slice_axis = self.obj.columns
-            else:
-                slice_axis = self._selection_list
-            slicer = lambda x: self.obj[x]
+    def _iterate_slices(self) -> Iterable[Tuple[Optional[Hashable], Series]]:
+        obj = self._selected_obj
+        if self.axis == 1:
+            obj = obj.T
+
+        if isinstance(obj, Series) and obj.name not in self.exclusions:
+            # Occurs when doing DataFrameGroupBy(...)["X"]
+            yield obj.name, obj
         else:
-            slice_axis = self.obj.index
-            slicer = self.obj.xs
+            for label, values in obj.items():
+                if label in self.exclusions:
+                    continue
 
-        for val in slice_axis:
-            if val in self.exclusions:
-                continue
-            yield val, slicer(val)
+                yield label, values
 
-    def _cython_agg_general(self, how, alt=None, numeric_only=True, min_count=-1):
+    def _cython_agg_general(
+        self, how: str, alt=None, numeric_only: bool = True, min_count: int = -1
+    ):
         new_items, new_blocks = self._cython_agg_blocks(
             how, alt=alt, numeric_only=numeric_only, min_count=min_count
         )
         return self._wrap_agged_blocks(new_items, new_blocks)
 
-    _block_agg_axis = 0
-
-    def _cython_agg_blocks(self, how, alt=None, numeric_only=True, min_count=-1):
+    def _cython_agg_blocks(
+        self, how: str, alt=None, numeric_only: bool = True, min_count: int = -1
+    ):
         # TODO: the actual managing of mgr_locs is a PITA
         # here, it should happen via BlockManager.combine
 
-        data, agg_axis = self._get_data_to_aggregate()
+        data = self._get_data_to_aggregate()
 
         if numeric_only:
             data = data.get_numeric_data(copy=False)
@@ -944,7 +976,7 @@ class DataFrameGroupBy(GroupBy):
             locs = block.mgr_locs.as_array
             try:
                 result, _ = self.grouper.aggregate(
-                    block.values, how, axis=agg_axis, min_count=min_count
+                    block.values, how, axis=1, min_count=min_count
                 )
             except NotImplementedError:
                 # generally if we have numeric_only=False
@@ -954,11 +986,17 @@ class DataFrameGroupBy(GroupBy):
                 if alt is None:
                     # we cannot perform the operation
                     # in an alternate way, exclude the block
+                    assert how == "ohlc"
                     deleted_items.append(locs)
                     continue
 
                 # call our grouper again with only this block
                 obj = self.obj[data.items[locs]]
+                if obj.shape[1] == 1:
+                    # Avoid call to self.values that can occur in DataFrame
+                    #  reductions; see GH#28949
+                    obj = obj.iloc[:, 0]
+
                 s = groupby(obj, self.grouper)
                 try:
                     result = s.aggregate(lambda x: alt(x, axis=self.axis))
@@ -967,17 +1005,30 @@ class DataFrameGroupBy(GroupBy):
                     # continue and exclude the block
                     deleted_items.append(locs)
                     continue
+                else:
+                    result = cast(DataFrame, result)
+                    # unwrap DataFrame to get array
+                    assert len(result._data.blocks) == 1
+                    result = result._data.blocks[0].values
+                    if isinstance(result, np.ndarray) and result.ndim == 1:
+                        result = result.reshape(1, -1)
+
             finally:
+                assert not isinstance(result, DataFrame)
+
                 if result is not no_result:
                     # see if we can cast the block back to the original dtype
                     result = maybe_downcast_numeric(result, block.dtype)
 
-                    if result.ndim == 1 and isinstance(result, np.ndarray):
+                    if block.is_extension and isinstance(result, np.ndarray):
                         # e.g. block.values was an IntegerArray
+                        # (1, N) case can occur if block.values was Categorical
+                        #  and result is ndarray[object]
+                        assert result.ndim == 1 or result.shape[0] == 1
                         try:
                             # Cast back if feasible
                             result = type(block.values)._from_sequence(
-                                result, dtype=block.values.dtype
+                                result.ravel(), dtype=block.values.dtype
                             )
                         except ValueError:
                             # reshape to be valid for non-Extension Block
@@ -1025,51 +1076,44 @@ class DataFrameGroupBy(GroupBy):
 
         result = OrderedDict()
         if axis != obj._info_axis_number:
-            try:
-                for name, data in self:
-                    result[name] = self._try_cast(func(data, *args, **kwargs), data)
-            except Exception:
-                return self._aggregate_item_by_item(func, *args, **kwargs)
+            for name, data in self:
+                fres = func(data, *args, **kwargs)
+                result[name] = self._try_cast(fres, data)
         else:
             for name in self.indices:
-                try:
-                    data = self.get_group(name, obj=obj)
-                    result[name] = self._try_cast(func(data, *args, **kwargs), data)
-                except Exception:
-                    wrapper = lambda x: func(x, *args, **kwargs)
-                    result[name] = data.apply(wrapper, axis=axis)
+                data = self.get_group(name, obj=obj)
+                fres = func(data, *args, **kwargs)
+                result[name] = self._try_cast(fres, data)
 
         return self._wrap_frame_output(result, obj)
 
-    def _aggregate_item_by_item(self, func, *args, **kwargs):
+    def _aggregate_item_by_item(self, func, *args, **kwargs) -> DataFrame:
         # only for axis==0
 
         obj = self._obj_with_exclusions
-        result = OrderedDict()
+        result = OrderedDict()  # type: dict
         cannot_agg = []
         errors = None
         for item in obj:
             data = obj[item]
             colg = SeriesGroupBy(data, selection=item, grouper=self.grouper)
 
+            cast = self._transform_should_cast(func)
             try:
-                cast = self._transform_should_cast(func)
-
                 result[item] = colg.aggregate(func, *args, **kwargs)
-                if cast:
-                    result[item] = self._try_cast(result[item], data)
 
             except ValueError as err:
                 if "Must produce aggregated value" in str(err):
                     # raised in _aggregate_named, handle at higher level
                     #  see test_apply_with_mutated_index
                     raise
+                # otherwise we get here from an AttributeError in _make_wrapper
                 cannot_agg.append(item)
                 continue
-            except TypeError as e:
-                cannot_agg.append(item)
-                errors = e
-                continue
+
+            else:
+                if cast:
+                    result[item] = self._try_cast(result[item], data)
 
         result_columns = obj.columns
         if cannot_agg:
@@ -1086,10 +1130,6 @@ class DataFrameGroupBy(GroupBy):
             output_keys = labels
         else:
             output_keys = sorted(output)
-            try:
-                output_keys.sort()
-            except TypeError:
-                pass
 
             if isinstance(labels, MultiIndex):
                 output_keys = MultiIndex.from_tuples(output_keys, names=labels.names)
@@ -1188,7 +1228,7 @@ class DataFrameGroupBy(GroupBy):
                         return self._concat_objects(keys, values, not_indexed_same=True)
 
                 try:
-                    if self.axis == 0:
+                    if self.axis == 0 and isinstance(v, ABCSeries):
                         # GH6124 if the list of Series have a consistent name,
                         # then propagate that name to the result.
                         index = v.index.copy()
@@ -1224,15 +1264,24 @@ class DataFrameGroupBy(GroupBy):
                                 axis=self.axis,
                             ).unstack()
                             result.columns = index
-                    else:
+                    elif isinstance(v, ABCSeries):
                         stacked_values = np.vstack([np.asarray(v) for v in values])
                         result = DataFrame(
                             stacked_values.T, index=v.index, columns=key_index
                         )
+                    else:
+                        # GH#1738: values is list of arrays of unequal lengths
+                        #  fall through to the outer else clause
+                        # TODO: sure this is right?  we used to do this
+                        #  after raising AttributeError above
+                        return Series(
+                            values, index=key_index, name=self._selection_name
+                        )
 
-                except (ValueError, AttributeError):
+                except ValueError:
+                    # TODO: not reached in tests; is this still needed?
                     # GH1738: values is list of arrays of unequal lengths fall
-                    # through to the outer else caluse
+                    # through to the outer else clause
                     return Series(values, index=key_index, name=self._selection_name)
 
                 # if we have date/time like in the original, then coerce dates
@@ -1248,12 +1297,12 @@ class DataFrameGroupBy(GroupBy):
             # values are not series or array-like but scalars
             else:
                 # only coerce dates if we find at least 1 datetime
-                coerce = any(isinstance(x, Timestamp) for x in values)
+                should_coerce = any(isinstance(x, Timestamp) for x in values)
                 # self._selection_name not passed through to Series as the
                 # result should not take the name of original selection
                 # of columns
                 return Series(values, index=key_index)._convert(
-                    datetime=True, coerce=coerce
+                    datetime=True, coerce=should_coerce
                 )
 
         else:
@@ -1348,7 +1397,7 @@ class DataFrameGroupBy(GroupBy):
 
         return self._transform_fast(result, obj, func)
 
-    def _transform_fast(self, result, obj, func_nm):
+    def _transform_fast(self, result: DataFrame, obj: DataFrame, func_nm) -> DataFrame:
         """
         Fast transform path for aggregations
         """
@@ -1388,8 +1437,11 @@ class DataFrameGroupBy(GroupBy):
         # if we make it here, test if we can use the fast path
         try:
             res_fast = fast_path(group)
+        except AssertionError:
+            raise
         except Exception:
             # Hard to know ex-ante what exceptions `fast_path` might raise
+            # TODO: no test cases get here
             return path, res
 
         # verify fast path does not change columns (and names), otherwise
@@ -1405,16 +1457,18 @@ class DataFrameGroupBy(GroupBy):
 
         return path, res
 
-    def _transform_item_by_item(self, obj, wrapper):
+    def _transform_item_by_item(self, obj: DataFrame, wrapper) -> DataFrame:
         # iterate through columns
         output = {}
         inds = []
         for i, col in enumerate(obj):
             try:
                 output[col] = self[col].transform(wrapper)
-                inds.append(i)
-            except Exception:
+            except TypeError:
+                # e.g. trying to call nanmean with string values
                 pass
+            else:
+                inds.append(i)
 
         if len(output) == 0:
             raise TypeError("Transform function invalid for data types")
@@ -1482,13 +1536,13 @@ class DataFrameGroupBy(GroupBy):
             else:
                 # non scalars aren't allowed
                 raise TypeError(
-                    "filter function returned a %s, "
-                    "but expected a scalar bool" % type(res).__name__
+                    "filter function returned a {typ}, "
+                    "but expected a scalar bool".format(typ=type(res).__name__)
                 )
 
         return self._apply_filter(indices, dropna)
 
-    def _gotitem(self, key, ndim, subset=None):
+    def _gotitem(self, key, ndim: int, subset=None):
         """
         sub-classes to define
         return a sliced object
@@ -1523,7 +1577,7 @@ class DataFrameGroupBy(GroupBy):
 
         raise AssertionError("invalid ndim for _gotitem")
 
-    def _wrap_frame_output(self, result, obj):
+    def _wrap_frame_output(self, result, obj) -> DataFrame:
         result_index = self.grouper.levels[0]
 
         if self.axis == 0:
@@ -1534,9 +1588,9 @@ class DataFrameGroupBy(GroupBy):
     def _get_data_to_aggregate(self):
         obj = self._obj_with_exclusions
         if self.axis == 1:
-            return obj.T._data, 1
+            return obj.T._data
         else:
-            return obj._data, 1
+            return obj._data
 
     def _insert_inaxis_grouper_inplace(self, result):
         # zip in reverse so we can always insert at loc 0
@@ -1574,7 +1628,7 @@ class DataFrameGroupBy(GroupBy):
 
         return self._reindex_output(result)._convert(datetime=True)
 
-    def _wrap_transformed_output(self, output, names=None):
+    def _wrap_transformed_output(self, output, names=None) -> DataFrame:
         return DataFrame(output, index=self.obj.index)
 
     def _wrap_agged_blocks(self, items, blocks):
@@ -1622,7 +1676,7 @@ class DataFrameGroupBy(GroupBy):
         DataFrame
             Count of values within each group.
         """
-        data, _ = self._get_data_to_aggregate()
+        data = self._get_data_to_aggregate()
         ids, _, ngroups = self.grouper.group_info
         mask = ids != -1
 
@@ -1632,21 +1686,21 @@ class DataFrameGroupBy(GroupBy):
         )
         loc = (blk.mgr_locs for blk in data.blocks)
 
-        counter = partial(lib.count_level_2d, labels=ids, max_bin=ngroups, axis=1)
-        blk = map(make_block, map(counter, val), loc)
+        counted = [
+            lib.count_level_2d(x, labels=ids, max_bin=ngroups, axis=1) for x in val
+        ]
+        blk = map(make_block, counted, loc)
 
         return self._wrap_agged_blocks(data.items, list(blk))
 
-    def nunique(self, dropna=True):
+    def nunique(self, dropna: bool = True):
         """
         Return DataFrame with number of distinct observations per group for
         each column.
 
-        .. versionadded:: 0.20.0
-
         Parameters
         ----------
-        dropna : boolean, default True
+        dropna : bool, default True
             Don't include NaN in the counts.
 
         Returns
@@ -1708,7 +1762,7 @@ class DataFrameGroupBy(GroupBy):
     boxplot = boxplot_frame_groupby
 
 
-def _is_multi_agg_with_relabel(**kwargs):
+def _is_multi_agg_with_relabel(**kwargs) -> bool:
     """
     Check whether kwargs passed to .agg look like multi-agg with relabeling.
 
@@ -1730,7 +1784,9 @@ def _is_multi_agg_with_relabel(**kwargs):
     >>> _is_multi_agg_with_relabel()
     False
     """
-    return all(isinstance(v, tuple) and len(v) == 2 for v in kwargs.values()) and kwargs
+    return all(isinstance(v, tuple) and len(v) == 2 for v in kwargs.values()) and (
+        len(kwargs) > 0
+    )
 
 
 def _normalize_keyword_aggregation(kwargs):
@@ -1845,7 +1901,7 @@ def _managle_lambda_list(aggfuncs: Sequence[Any]) -> Sequence[Any]:
     mangled_aggfuncs = []
     for aggfunc in aggfuncs:
         if com.get_callable_name(aggfunc) == "<lambda>":
-            aggfunc = functools.partial(aggfunc)
+            aggfunc = partial(aggfunc)
             aggfunc.__name__ = "<lambda_{}>".format(i)
             i += 1
         mangled_aggfuncs.append(aggfunc)
