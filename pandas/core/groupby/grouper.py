@@ -3,7 +3,7 @@ Provide user facing operators for doing the split part of the
 split-apply-combine paradigm.
 """
 
-from typing import Optional, Tuple
+from typing import Hashable, List, Optional, Tuple
 import warnings
 
 import numpy as np
@@ -26,7 +26,6 @@ import pandas.core.algorithms as algorithms
 from pandas.core.arrays import Categorical, ExtensionArray
 import pandas.core.common as com
 from pandas.core.frame import DataFrame
-from pandas.core.generic import NDFrame
 from pandas.core.groupby.categorical import recode_for_groupby, recode_from_groupby
 from pandas.core.groupby.ops import BaseGrouper
 from pandas.core.index import CategoricalIndex, Index, MultiIndex
@@ -120,7 +119,7 @@ class Grouper:
     def ax(self):
         return self.grouper
 
-    def _get_grouper(self, obj, validate=True):
+    def _get_grouper(self, obj, validate: bool = True):
         """
         Parameters
         ----------
@@ -134,7 +133,7 @@ class Grouper:
         """
 
         self._set_grouper(obj)
-        self.grouper, exclusions, self.obj = _get_grouper(
+        self.grouper, exclusions, self.obj = get_grouper(
             self.obj,
             [self.key],
             axis=self.axis,
@@ -144,17 +143,18 @@ class Grouper:
         )
         return self.binner, self.grouper, self.obj
 
-    def _set_grouper(self, obj, sort=False):
+    def _set_grouper(self, obj: FrameOrSeries, sort: bool = False):
         """
         given an object and the specifications, setup the internal grouper
         for this particular specification
 
         Parameters
         ----------
-        obj : the subject object
+        obj : Series or DataFrame
         sort : bool, default False
             whether the resulting grouper should be sorted
         """
+        assert obj is not None
 
         if self.key is not None and self.level is not None:
             raise ValueError("The Grouper cannot specify both a key and a level!")
@@ -210,15 +210,15 @@ class Grouper:
     def groups(self):
         return self.grouper.groups
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         attrs_list = (
-            "{}={!r}".format(attr_name, getattr(self, attr_name))
+            "{name}={val!r}".format(name=attr_name, val=getattr(self, attr_name))
             for attr_name in self._attributes
             if getattr(self, attr_name) is not None
         )
         attrs = ", ".join(attrs_list)
         cls_name = self.__class__.__name__
-        return "{}({})".format(cls_name, attrs)
+        return "{cls}({attrs})".format(cls=cls_name, attrs=attrs)
 
 
 class Grouping:
@@ -372,8 +372,8 @@ class Grouping:
 
                 self.grouper = self.grouper.astype("timedelta64[ns]")
 
-    def __repr__(self):
-        return "Grouping({0})".format(self.name)
+    def __repr__(self) -> str:
+        return "Grouping({name})".format(name=self.name)
 
     def __iter__(self):
         return iter(self.indices)
@@ -429,18 +429,18 @@ class Grouping:
         return self.index.groupby(Categorical.from_codes(self.codes, self.group_index))
 
 
-def _get_grouper(
-    obj: NDFrame,
+def get_grouper(
+    obj: FrameOrSeries,
     key=None,
     axis: int = 0,
     level=None,
-    sort=True,
-    observed=False,
-    mutated=False,
-    validate=True,
-):
+    sort: bool = True,
+    observed: bool = False,
+    mutated: bool = False,
+    validate: bool = True,
+) -> Tuple[BaseGrouper, List[Hashable], FrameOrSeries]:
     """
-    create and return a BaseGrouper, which is an internal
+    Create and return a BaseGrouper, which is an internal
     mapping of how to create the grouper indexers.
     This may be composed of multiple Grouping objects, indicating
     multiple groupers
@@ -456,9 +456,9 @@ def _get_grouper(
     a BaseGrouper.
 
     If observed & we have a categorical grouper, only show the observed
-    values
+    values.
 
-    If validate, then check for key/level overlaps
+    If validate, then check for key/level overlaps.
 
     """
     group_axis = obj._get_axis(axis)
@@ -517,7 +517,7 @@ def _get_grouper(
         if key.key is None:
             return grouper, [], obj
         else:
-            return grouper, {key.key}, obj
+            return grouper, [key.key], obj
 
     # already have a BaseGrouper, just return it
     elif isinstance(key, BaseGrouper):
@@ -530,10 +530,8 @@ def _get_grouper(
     # unhashable elements of `key`. Any unhashable elements implies that
     # they wanted a list of keys.
     # https://github.com/pandas-dev/pandas/issues/18314
-    is_tuple = isinstance(key, tuple)
-    all_hashable = is_tuple and is_hashable(key)
-
-    if is_tuple:
+    if isinstance(key, tuple):
+        all_hashable = is_hashable(key)
         if (
             all_hashable and key not in obj and set(key).issubset(obj)
         ) or not all_hashable:
@@ -573,7 +571,8 @@ def _get_grouper(
             all_in_columns_index = all(
                 g in obj.columns or g in obj.index.names for g in keys
             )
-        elif isinstance(obj, Series):
+        else:
+            assert isinstance(obj, Series)
             all_in_columns_index = all(g in obj.index.names for g in keys)
 
         if not all_in_columns_index:
@@ -586,8 +585,8 @@ def _get_grouper(
     else:
         levels = [level] * len(keys)
 
-    groupings = []
-    exclusions = []
+    groupings = []  # type: List[Grouping]
+    exclusions = []  # type: List[Hashable]
 
     # if the actual grouper should be obj[key]
     def is_in_axis(key) -> bool:
@@ -672,7 +671,7 @@ def _get_grouper(
     return grouper, exclusions, obj
 
 
-def _is_label_like(val):
+def _is_label_like(val) -> bool:
     return isinstance(val, (str, tuple)) or (val is not None and is_scalar(val))
 
 

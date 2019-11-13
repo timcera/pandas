@@ -591,14 +591,12 @@ def to_datetime(
 
     Parameters
     ----------
-    arg : int, float, str, datetime, list, tuple, 1-d array, Series
-           or DataFrame/dict-like
-
+    arg : int, float, str, datetime, list, tuple, 1-d array, Series DataFrame/dict-like
+        The object to convert to a datetime.
     errors : {'ignore', 'raise', 'coerce'}, default 'raise'
-
-        - If 'raise', then invalid parsing will raise an exception
-        - If 'coerce', then invalid parsing will be set as NaT
-        - If 'ignore', then invalid parsing will return the input
+        - If 'raise', then invalid parsing will raise an exception.
+        - If 'coerce', then invalid parsing will be set as NaT.
+        - If 'ignore', then invalid parsing will return the input.
     dayfirst : bool, default False
         Specify a date parse order if `arg` is str or its list-likes.
         If True, parses dates with the day first, eg 10/11/12 is parsed as
@@ -619,7 +617,6 @@ def to_datetime(
         Return UTC DatetimeIndex if True (converting any tz-aware
         datetime.datetime objects as well).
     box : bool, default True
-
         - If True returns a DatetimeIndex or Index-like object
         - If False returns ndarray of values.
 
@@ -629,12 +626,12 @@ def to_datetime(
             respectively.
 
     format : str, default None
-        strftime to parse time, eg "%d/%m/%Y", note that "%f" will parse
+        The strftime to parse time, eg "%d/%m/%Y", note that "%f" will parse
         all the way up to nanoseconds.
         See strftime documentation for more information on choices:
-        https://docs.python.org/3/library/datetime.html#strftime-and-strptime-behavior
+        https://docs.python.org/3/library/datetime.html#strftime-and-strptime-behavior.
     exact : bool, True by default
-
+        Behaves as:
         - If True, require an exact format match.
         - If False, allow the format to match anywhere in the target string.
 
@@ -682,11 +679,12 @@ def to_datetime(
         .. versionadded:: 0.23.0
 
         .. versionchanged:: 0.25.0
-            - changed default value from False to True
+            - changed default value from False to True.
 
     Returns
     -------
-    ret : datetime if parsing succeeded.
+    datetime
+        If parsing succeeded.
         Return type depends on input:
 
         - list-like: DatetimeIndex
@@ -742,10 +740,10 @@ def to_datetime(
     4    3/12/2000
     dtype: object
 
-    >>> %timeit pd.to_datetime(s,infer_datetime_format=True)  # doctest: +SKIP
+    >>> %timeit pd.to_datetime(s, infer_datetime_format=True)  # doctest: +SKIP
     100 loops, best of 3: 10.4 ms per loop
 
-    >>> %timeit pd.to_datetime(s,infer_datetime_format=False)  # doctest: +SKIP
+    >>> %timeit pd.to_datetime(s, infer_datetime_format=False)  # doctest: +SKIP
     1 loop, best of 3: 471 ms per loop
 
     Using a unix epoch time
